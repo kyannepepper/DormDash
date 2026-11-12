@@ -1,0 +1,899 @@
+/* Dorm Dash — single-page app
+   Everything is stored in localStorage so the box, plan, and dasher progress survive a refresh. */
+
+(() => {
+  "use strict";
+
+  // ---------------- State ----------------
+  const KEY = "dormdash:v1";
+  const defaults = () => ({
+    box: {},
+    plan: "weekly",
+    editing: false,
+    delivery: { method: "dash", name: "", email: "", hall: "", room: "", slot: "sun" },
+    subscription: null,
+    orders: [],
+    dasher: null,
+    lastOrderId: null,
+  });
+  let state;
+  try { state = Object.assign(defaults(), JSON.parse(localStorage.getItem(KEY) || "{}")); }
+  catch { state = defaults(); }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
+
+  const ui = { diet: new Set(), sort: "popular" };
+
+  // ---------------- Helpers ----------------
+  const $ = (s, el = document) => el.querySelector(s);
+  const money = (n) => "$" + n.toFixed(2);
+  const mealById = (id) => MEALS.find((m) => m.id === id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const countOf = (items) => Object.values(items).reduce((a, b) => a + b, 0);
+  const totalOf = (items) => Object.entries(items).reduce((s, [id, q]) => s + (mealById(id)?.price || 0) * q, 0);
+  const boxCount = () => countOf(state.box);
+  const fmtDate = (d, opts = { weekday: "short", month: "short", day: "numeric" }) => d.toLocaleDateString("en-US", opts);
+
+  // Next delivery: Sunday evening or Monday morning. Orders close Friday 11:59pm.
+  const WINDOWS = {
+    dash: { sun: "5–9 PM", mon: "7–10 AM" },
+    pickup: { sun: "12–8 PM", mon: "8 AM–6 PM" },
+  };
+  const isPickup = (x) => (x?.method || "dash") === "pickup";
+  const windowLabel = (method, slot) => `${slot === "mon" ? "Monday" : "Sunday"} ${WINDOWS[method || "dash"][slot || "sun"]}`;
+
+  function nextDrop(slot = "sun", method = "dash") {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let add = (7 - d.getDay()) % 7 || 7;          // days to next Sunday
+    if (d.getDay() === 6) add += 7;                 // Saturday: this week's cutoff has passed
+    const sunday = new Date(d); sunday.setDate(d.getDate() + add);
+    const drop = new Date(sunday); if (slot === "mon") drop.setDate(sunday.getDate() + 1);
+    const cutoff = new Date(sunday); cutoff.setDate(sunday.getDate() - 2);
+    return { drop, cutoff, window: WINDOWS[method || "dash"][slot === "mon" ? "mon" : "sun"] };
+  }
+
+  function imgTag(meal, cls = "") {
+    return `<div class="img ${cls}" data-label="${esc(meal.name)}">
+      <img src="${meal.img}" alt="${esc(meal.name)}" loading="lazy" onerror="this.parentElement.classList.add('fallback')">
+    </div>`;
+  }
+
+  function toast(msg) {
+    const t = $("#toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove("show"), 2400);
+  }
+
+  function updateBoxCount(bump) {
+    const el = $("#boxCount");
+    el.textContent = boxCount();
+    if (bump) { el.classList.add("bump"); setTimeout(() => el.classList.remove("bump"), 200); }
+  }
+
+  function setQty(id, qty) {
+    const current = state.box[id] || 0;
+    const delta = qty - current;
+    if (delta > 0 && boxCount() + delta > MAX_MEALS) {
+      toast(`Your box holds up to ${MAX_MEALS} meals a week.`);
+      return false;
+    }
+    if (qty <= 0) delete state.box[id]; else state.box[id] = qty;
+    save();
+    updateBoxCount(true);
+    return true;
+  }
+
+  // ---------------- Shared components ----------------
+  function tagBadges(meal) {
+    return meal.tags.map((t) => `<span class="badge ${t === "Vegetarian" ? "veg" : t === "High protein" ? "pro" : ""}">${t}</span>`).join("");
+  }
+
+  function qtyControl(meal) {
+    const q = state.box[meal.id] || 0;
+    if (!q) return `<button class="add-btn" data-action="inc" data-id="${meal.id}" aria-label="Add ${esc(meal.name)} to box">+</button>`;
+    return `<div class="stepper" aria-label="Quantity of ${esc(meal.name)}">
+      <button data-action="dec" data-id="${meal.id}" aria-label="Remove one">−</button>
+      <span>${q}</span>
+      <button class="plus" data-action="inc" data-id="${meal.id}" aria-label="Add one">+</button>
+    </div>`;
+  }
+
+  function methodLabel(meal) {
+    return METHODS[meal.method].label;
+  }
+
+  function mealCard(meal) {
+    return `<article class="meal-card" data-meal="${meal.id}">
+      <div style="position:relative" data-action="open-meal" data-id="${meal.id}">
+        <div class="badges">${tagBadges(meal)}</div>
+        ${imgTag(meal)}
+      </div>
+      <div class="meal-body">
+        <div class="meal-top">
+          <div>
+            <div class="meal-meta">${esc(meal.cuisine)} · ${meal.minutes} min</div>
+            <h3 class="meal-name" data-action="open-meal" data-id="${meal.id}">${esc(meal.name)}</h3>
+          </div>
+          <div class="meal-price">${money(meal.price)}</div>
+        </div>
+        <p class="meal-desc">${esc(meal.desc)}</p>
+        <div class="meal-foot">
+          <span class="info">${methodLabel(meal)} · ${meal.nutrition.protein}g protein</span>
+          <span class="qty-slot" data-id="${meal.id}">${qtyControl(meal)}</span>
+        </div>
+      </div>
+    </article>`;
+  }
+
+  function refreshQtySlots() {
+    document.querySelectorAll(".qty-slot").forEach((slot) => {
+      slot.innerHTML = qtyControl(mealById(slot.dataset.id));
+    });
+    renderBoxBar();
+  }
+
+  function boxBarHTML() {
+    const n = boxCount();
+    return `<div class="box-bar ${n ? "show" : ""}" id="boxBar">
+      <div class="meter">
+        <strong>${n} of ${MAX_MEALS} meals · ${money(totalOf(state.box))}</strong>
+        <small>${n ? `Avg ${money(totalOf(state.box) / n)} per meal · free dorm delivery` : "Add meals to start your box"}</small>
+        <div class="track"><div class="fill" style="width:${(n / MAX_MEALS) * 100}%"></div></div>
+      </div>
+      <a href="#/box" class="btn btn-primary btn-sm">${state.editing ? "Review changes" : "Review box"} →</a>
+    </div>`;
+  }
+  function renderBoxBar() {
+    const bar = $("#boxBar");
+    if (bar) bar.outerHTML = boxBarHTML();
+  }
+
+  function stepPhoto(id, alt) {
+    return `<div class="img step-img" data-label="${esc(alt)}">
+      <img src="https://images.pexels.com/photos/${id}/pexels-photo-${id}.jpeg?auto=compress&cs=tinysrgb&w=800" alt="${esc(alt)}" loading="lazy" onerror="this.parentElement.classList.add('fallback')">
+    </div>`;
+  }
+
+  // ---------------- Views ----------------
+  function viewHome() {
+    const hero = mealById("pesto-gnocchi");
+    const list = MEALS.slice(0, 6);
+    const { drop, cutoff } = nextDrop();
+    return `
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <span class="sticker">CAMPUS FUEL, UPGRADED</span>
+          <h1 class="display">Eat well.<span class="accent">Dash less.</span></h1>
+          <p class="hero-sub">Healthy $3–$5 meal kits made for tiny fridges, busy schedules, and zero grocery runs. Pick up to 14. We deliver the week.</p>
+          <div class="hero-ctas">
+            <a href="#/menu" class="btn btn-primary">Build my box →</a>
+            <a href="#/how" class="btn btn-ghost">See how it works</a>
+          </div>
+          <div class="checks"><span>No subscription lock-in</span><span>Nutrition-forward</span><span>Student delivered</span></div>
+        </div>
+        <div class="hero-art">
+          <div class="blob lime"></div><div class="blob sky"></div>
+          <div class="hero-card" data-action="open-meal" data-id="${hero.id}" style="cursor:pointer">
+            ${imgTag(hero)}
+            <span class="pill">Ready in ${hero.minutes} min</span>
+            <div class="label">
+              <div><small>This week's favorite</small><strong>${hero.name}</strong></div>
+              <span class="price">${money(hero.price)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band-dark" id="how">
+      <div class="wrap">
+        <p class="eyebrow">How it works</p>
+        <h2>Your week of food, sorted by Sunday.</h2>
+        <div class="steps">
+          <div class="step">
+            ${stepPhoto("4008586", "Hands using a phone to order food")}
+            <div class="num">01</div>
+            <h3>Pick your meals</h3>
+            <p>Choose 1–14 microwave-ready meals in the app. No stove, no oven, no dishes. Order by Friday night.</p>
+            <a href="#/menu" class="btn btn-primary btn-sm" style="margin-top:18px">Plan my meals →</a>
+          </div>
+          <div class="step">
+            ${stepPhoto("10361128", "Food pre-portioned in sealed plastic bags")}
+            <div class="num">02</div>
+            <h3>It arrives packed</h3>
+            <p>Every meal comes pre-portioned in sealed, labeled bags, ready to drop straight into your mini fridge or freezer.</p>
+          </div>
+          <div class="step">
+            ${stepPhoto("4604599", "Student courier biking with a delivery bag")}
+            <div class="num">03</div>
+            <h3>Pick it up or get it dashed</h3>
+            <p>Grab your box yourself at the campus store, or have a verified student dasher bring it right to your dorm at the start of the week. Both are free.</p>
+          </div>
+          <div class="step">
+            ${stepPhoto("5749087", "Student heating a meal in the microwave")}
+            <div class="num">04</div>
+            <h3>Make it yourself, easily</h3>
+            <p>Each bag has a simple step card on the back. Just open it, microwave it, and eat. Most meals are ready in under 5 minutes.</p>
+          </div>
+        </div>
+        <p style="margin-top:48px;color:rgba(255,255,255,.75);font-weight:600">Next drop: <strong style="color:#fff">${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}</strong> · order by ${fmtDate(cutoff, { weekday: "long" })} 11:59 PM</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="eyebrow">This week's drop</p><h2 class="display">Good food. Tiny price.</h2></div>
+          <p>Pre-portioned, nutrient-dense, and tested in real dorm rooms. Every meal stays between $3 and $5.</p>
+        </div>
+        <div class="meal-grid">${list.map(mealCard).join("")}</div>
+        <div style="text-align:center;margin-top:48px"><a href="#/menu" class="btn btn-dark">See the full menu (${MEALS.length} meals) →</a></div>
+      </div>
+    </section>
+
+    ${dasherBand()}
+    ${boxBarHTML()}`;
+  }
+
+  function dasherBand() {
+    return `<section class="dasher-band">
+      <div>
+        <p class="eyebrow">For students, by students</p>
+        <h2 class="display">Make cash between classes.</h2>
+        <p>Pick up boxes from the campus store, deliver to nearby dorms, and earn on a schedule that fits your week. No car required.</p>
+        <a href="#/dash" class="btn btn-dark">${state.dasher ? "Open dasher dashboard" : "Apply to dash"} →</a>
+      </div>
+      <div class="stat-stack">
+        <div class="stat"><span>Typical hourly earnings</span><strong>$18–24</strong></div>
+        <div class="stat"><span>Average weekly shift</span><strong>2–3 hrs</strong></div>
+        <div class="stat"><span>On-campus routes</span><strong>100%</strong></div>
+      </div>
+    </section>`;
+  }
+
+  function viewMenu() {
+    let list = [...MEALS];
+    if (ui.diet.has("veg")) list = list.filter((m) => m.tags.includes("Vegetarian"));
+    if (ui.diet.has("protein")) list = list.filter((m) => m.nutrition.protein >= 25);
+    if (ui.diet.has("budget")) list = list.filter((m) => m.price < 4);
+    if (ui.diet.has("freezer")) list = list.filter((m) => m.storage === "freezer");
+    if (ui.sort === "low") list = [...list].sort((a, b) => a.price - b.price);
+    if (ui.sort === "protein") list = [...list].sort((a, b) => b.nutrition.protein - a.nutrition.protein);
+    if (ui.sort === "fast") list = [...list].sort((a, b) => a.minutes - b.minutes);
+    if (ui.sort === "popular") list = [...list].sort((a, b) => b.tags.includes("Popular") - a.tags.includes("Popular"));
+    const diet = (k, l) => `<button class="chip small ${ui.diet.has(k) ? "active" : ""}" data-action="diet" data-value="${k}" aria-pressed="${ui.diet.has(k)}">${l}</button>`;
+    return `
+    <section class="page-head wrap">
+      <p class="eyebrow">${state.editing ? "Editing your weekly plan" : "Full menu"}</p>
+      <h1 class="display">Pick up to ${MAX_MEALS} meals.</h1>
+      <p>Every meal is made for the dorm microwave and ready in 5 minutes or less. Fresh meals go in the fridge, the rest in the freezer.</p>
+    </section>
+    <section class="wrap" style="padding-bottom:140px">
+      <div class="filters" role="group" aria-label="Filter meals">
+        ${diet("veg", "Vegetarian")}${diet("protein", "25g+ protein")}${diet("budget", "Under $4")}${diet("freezer", "Freezer-friendly")}
+        <span class="spacer"></span>
+        <label class="muted" style="font-weight:600;font-size:14px">Sort
+          <select data-action="sort" aria-label="Sort meals">
+            <option value="popular" ${ui.sort === "popular" ? "selected" : ""}>Popular</option>
+            <option value="low" ${ui.sort === "low" ? "selected" : ""}>Price: low to high</option>
+            <option value="protein" ${ui.sort === "protein" ? "selected" : ""}>Most protein</option>
+            <option value="fast" ${ui.sort === "fast" ? "selected" : ""}>Fastest</option>
+          </select>
+        </label>
+      </div>
+      <div class="meal-grid">${list.length ? list.map(mealCard).join("") : `<div class="empty"><h3>No meals match those filters.</h3><button class="link-btn" data-action="clear-diet">Clear filters</button></div>`}</div>
+    </section>
+    ${boxBarHTML()}`;
+  }
+
+  function viewBox() {
+    const items = Object.entries(state.box);
+    const n = boxCount();
+    if (!n) {
+      return `<section class="confirm wrap">
+        <div class="tick" style="background:var(--yellow)">0</div>
+        <h1 class="display">Your box is empty.</h1>
+        <p class="muted" style="font-size:19px">Add between 1 and ${MAX_MEALS} meals for the week. Most students start with 5–7.</p>
+        <div class="actions" style="justify-content:center"><a class="btn btn-primary" href="#/menu">Browse the menu →</a>
+        ${state.editing ? `<button class="btn btn-ghost" data-action="cancel-edit">Cancel editing</button>` : ""}</div>
+      </section>`;
+    }
+    const subtotal = totalOf(state.box);
+    const fridge = items.filter(([id]) => mealById(id).storage === "fridge").reduce((s, [, q]) => s + q, 0);
+    const freezer = n - fridge;
+    const d = state.delivery;
+    const pickup = isPickup(d);
+    const { drop, cutoff, window } = nextDrop(d.slot, d.method);
+    const hallOpts = DORMS.map((h) => `<option ${d.hall === h ? "selected" : ""}>${h}</option>`).join("");
+
+    return `
+    <section class="page-head wrap">
+      <p class="eyebrow">${state.editing ? "Edit weekly plan" : "My box"}</p>
+      <h1 class="display">${n} meal${n > 1 ? "s" : ""} for the week.</h1>
+      <p>${pickup ? "Ready for pickup" : "Arrives"} ${fmtDate(drop, { weekday: "long", month: "short", day: "numeric" })}, ${window}. Order by ${fmtDate(cutoff, { weekday: "long" })} 11:59 PM.</p>
+    </section>
+    <section class="wrap split">
+      <div>
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <h2 style="margin:0">Meals</h2>
+            <a href="#/menu" class="link-btn">+ Add more (${MAX_MEALS - n} left)</a>
+          </div>
+          ${items.map(([id, q]) => {
+            const m = mealById(id);
+            return `<div class="line-item">
+              ${imgTag(m)}
+              <div><h4>${esc(m.name)}</h4><small>${methodLabel(m)} · ${m.storage === "freezer" ? "Freezer" : `Fridge, eat within ${m.keepsDays} days`}</small></div>
+              <div class="right"><strong>${money(m.price * q)}</strong>
+                <div class="stepper"><button data-action="dec" data-id="${id}" aria-label="Remove one">−</button><span>${q}</span><button class="plus" data-action="inc" data-id="${id}" aria-label="Add one">+</button></div>
+              </div>
+            </div>`;
+          }).join("")}
+        </div>
+
+        <div class="panel">
+          <h2>Storage plan</h2>
+          <p class="muted" style="margin-top:-8px">Here's where everything goes when your box lands.</p>
+          <div class="storage">
+            <div class="fr"><strong>${fridge}</strong><small>meals in the fridge. Eat these first (Mon–Thu).</small></div>
+            <div class="fz"><strong>${freezer}</strong><small>meals in the freezer. Good for 30 days.</small></div>
+          </div>
+        </div>
+      </div>
+
+      <form class="sticky" id="checkoutForm" novalidate>
+        <div class="panel">
+          <h2>Ordering</h2>
+          ${state.editing ? `<p class="note">You're editing your weekly subscription. Changes apply starting with the next drop.</p>` : `
+          <div class="plan-toggle" role="radiogroup" aria-label="Order type">
+            <button type="button" class="plan-opt ${state.plan === "weekly" ? "active" : ""}" data-action="plan" data-value="weekly" role="radio" aria-checked="${state.plan === "weekly"}"><strong>Every week</strong><small>Same box weekly. Edit, skip, or pause any time.</small></button>
+            <button type="button" class="plan-opt ${state.plan === "once" ? "active" : ""}" data-action="plan" data-value="once" role="radio" aria-checked="${state.plan === "once"}"><strong>Just this week</strong><small>One-time box, no subscription.</small></button>
+          </div>`}
+        </div>
+
+        <div class="panel">
+          <h2>How do you want it?</h2>
+          <div class="plan-toggle" role="radiogroup" aria-label="Pickup or delivery">
+            <button type="button" class="plan-opt ${!pickup ? "active" : ""}" data-action="method" data-value="dash" role="radio" aria-checked="${!pickup}"><strong>Get it dashed</strong><small>A student dasher brings it to your dorm room.</small></button>
+            <button type="button" class="plan-opt ${pickup ? "active" : ""}" data-action="method" data-value="pickup" role="radio" aria-checked="${pickup}"><strong>Pick it up</strong><small>Grab it at the campus store counter.</small></button>
+          </div>
+          <div class="form-grid" style="margin-top:20px">
+            <div class="field"><label for="f-name">Full name</label><input id="f-name" name="name" value="${esc(d.name)}" autocomplete="name" required><span class="err"></span></div>
+            <div class="field"><label for="f-email">School email</label><input id="f-email" name="email" type="email" value="${esc(d.email)}" placeholder="you@school.edu" autocomplete="email" required><span class="err"></span></div>
+            ${pickup ? `
+            <div class="field full"><p class="note" style="margin:0">📍 Campus Store, pickup counter (main floor). Show your order code and grab your labeled bag. Bring a tote — fridge items should go cold within 2 hours.</p></div>` : `
+            <div class="field"><label for="f-hall">Residence hall</label><select id="f-hall" name="hall" required><option value="">Choose your dorm</option>${hallOpts}</select><span class="err"></span></div>
+            <div class="field"><label for="f-room">Room number</label><input id="f-room" name="room" value="${esc(d.room)}" placeholder="e.g. 214B" required><span class="err"></span></div>`}
+            <div class="field full"><span class="label">${pickup ? "Pickup window" : "Delivery window"}</span>
+              <div class="check-row">
+                <label class="check-pill"><input type="radio" name="slot" value="sun" ${d.slot === "sun" ? "checked" : ""}><span>${windowLabel(d.method, "sun")}</span></label>
+                <label class="check-pill"><input type="radio" name="slot" value="mon" ${d.slot === "mon" ? "checked" : ""}><span>${windowLabel(d.method, "mon")}</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Summary</h2>
+          <div class="summary-row"><span>${n} meals</span><span>${money(subtotal)}</span></div>
+          <div class="summary-row"><span>${pickup ? "Campus store pickup" : "Dorm delivery"}</span><span class="free">FREE</span></div>
+          <div class="summary-row"><span>Avg per meal</span><span>${money(subtotal / n)}</span></div>
+          <div class="summary-row total"><span>${state.editing || state.plan === "weekly" ? "Weekly total" : "Total"}</span><span>${money(subtotal)}</span></div>
+          <p class="muted" style="font-size:13px;font-weight:600">Pay with card or campus dining dollars at confirmation. Demo app: no real payment is taken.</p>
+          <button class="btn btn-primary btn-block" type="submit">${state.editing ? "Update my plan" : state.plan === "weekly" ? "Start weekly plan" : "Place order"} · ${money(subtotal)}</button>
+          ${state.editing ? `<div style="text-align:center;margin-top:14px"><button type="button" class="link-btn" data-action="cancel-edit">Cancel editing</button></div>` : ""}
+        </div>
+      </form>
+    </section>`;
+  }
+
+  function viewConfirmed() {
+    const o = state.orders.find((x) => x.id === state.lastOrderId);
+    if (!o) return viewPlan();
+    const drop = new Date(o.deliveryDate);
+    return `<section class="confirm wrap">
+      <div class="tick">✓</div>
+      <p class="eyebrow">Order ${o.id}</p>
+      <h1 class="display">${o.type === "update" ? "Plan updated." : "You're set for the week."}</h1>
+      ${isPickup(o) ? `
+      <p class="muted" style="font-size:19px">${o.count} meals will be ready at the <strong style="color:var(--ink)">Campus Store pickup counter</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. Show this code at the counter:</p>
+      <div class="pickup-code">${o.code}</div>` : `
+      <p class="muted" style="font-size:19px">${o.count} meals heading to <strong style="color:var(--ink)">${esc(o.hall)}, room ${esc(o.room)}</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. We'll text you when your dasher is on the way.</p>`}
+      <div class="actions" style="justify-content:center">
+        <a class="btn btn-dark" href="#/plan">${o.type === "once" ? "Track my order" : "Manage my plan"} →</a>
+        <a class="btn btn-ghost" href="#/menu">Back to menu</a>
+      </div>
+    </section>`;
+  }
+
+  const STAGES = {
+    dash: [["Confirmed", "Order locked Fri"], ["Packed", "At the campus store"], ["Out with dasher", "Heading to your dorm"], ["Delivered", "Fridge it!"]],
+    pickup: [["Confirmed", "Order locked Fri"], ["Packed", "Sealed + labeled"], ["Ready for pickup", "At the store counter"], ["Picked up", "Fridge it!"]],
+  };
+
+  function tracker(stage, method = "dash") {
+    return `<div class="tracker">${STAGES[method || "dash"].map(([t, s], i) => `
+      <div class="track-step ${i < stage ? "done" : i === stage ? "current" : ""}">
+        <div class="dot">${i < stage ? "✓" : i + 1}</div><strong>${t}</strong><small>${s}</small>
+      </div>`).join("")}</div>`;
+  }
+
+  function viewPlan() {
+    const sub = state.subscription;
+    const lastOnce = state.orders.find((o) => o.type === "once");
+    if (!sub && !state.orders.length) {
+      return `<section class="confirm wrap">
+        <div class="tick" style="background:var(--sky)">◷</div>
+        <h1 class="display">No plan yet.</h1>
+        <p class="muted" style="font-size:19px">Build a box of 1–${MAX_MEALS} meals and choose weekly delivery or a one-time order.</p>
+        <a class="btn btn-primary" href="#/menu">Build my box →</a>
+      </section>`;
+    }
+
+    let main = "";
+    if (sub) {
+      const { drop, cutoff, window } = nextDrop(sub.slot, sub.method);
+      const where = isPickup(sub) ? `Campus store pickup (code ${sub.code})` : `${esc(sub.hall)}, room ${esc(sub.room)}`;
+      const status = sub.status === "paused" ? "paused" : sub.skipNext ? "skipped" : "active";
+      const statusText = { active: "Active", paused: "Paused", skipped: "Skipping next week" }[status];
+      const n = countOf(sub.items);
+      main = `
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:center">
+          <h2 style="margin:0">Weekly plan</h2><span class="pill-status ${status}">${statusText}</span>
+        </div>
+        <p class="muted" style="font-weight:600">${n} meals · ${money(totalOf(sub.items))}/week · ${where} · ${windowLabel(sub.method, sub.slot)}</p>
+        ${status === "active" ? `
+          <h3 style="margin:24px 0 0;font-size:20px">${isPickup(sub) ? "Next pickup" : "Next drop"}: ${fmtDate(drop, { weekday: "long", month: "short", day: "numeric" })}, ${window}</h3>
+          <p class="muted" style="margin:4px 0 0;font-weight:600">Changes lock ${fmtDate(cutoff, { weekday: "long" })} at 11:59 PM.</p>
+          ${tracker(sub.stage || 0, sub.method)}
+          ${(sub.stage || 0) === 3 ? `<p class="note">${isPickup(sub) ? "Picked up" : "Delivered"}! Put your ${countMeals(sub.items, "fridge")} fridge meals in the fridge and ${countMeals(sub.items, "freezer")} in the freezer.</p>` : ""}
+          <button class="link-btn" data-action="advance" data-target="sub" style="font-size:13px">${(sub.stage || 0) < 3 ? "Demo: simulate next delivery step" : "Demo: reset tracker"}</button>
+        ` : status === "skipped" ? `<p class="note">You're skipping the ${fmtDate(drop)} drop. You won't be charged that week.</p>` : `<p class="note">Your plan is paused. No boxes or charges until you resume.</p>`}
+        <div class="actions">
+          <button class="btn btn-dark btn-sm" data-action="edit-plan">Edit meals</button>
+          ${sub.status !== "paused" ? `<button class="btn btn-light btn-sm" data-action="skip">${sub.skipNext ? "Unskip next week" : "Skip next week"}</button>` : ""}
+          <button class="btn btn-light btn-sm" data-action="pause">${sub.status === "paused" ? "Resume plan" : "Pause plan"}</button>
+          <button class="link-btn danger" data-action="cancel-sub" style="margin-left:auto">Cancel plan</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>In your weekly box</h2>
+        ${Object.entries(sub.items).map(([id, q]) => {
+          const m = mealById(id);
+          return `<div class="line-item">${imgTag(m)}<div><h4>${esc(m.name)}</h4><small>${methodLabel(m)} · ${m.minutes} min</small></div>
+            <div class="right"><strong>×${q}</strong><button class="link-btn" data-action="open-meal" data-id="${id}" style="font-size:13px">Instructions</button></div></div>`;
+        }).join("")}
+      </div>`;
+    } else if (lastOnce) {
+      main = `<div class="panel">
+        <h2>Order ${lastOnce.id}</h2>
+        <p class="muted" style="font-weight:600">${lastOnce.count} meals · ${isPickup(lastOnce) ? `Campus store pickup (code ${lastOnce.code})` : `${esc(lastOnce.hall)}, room ${esc(lastOnce.room)}`} · ${fmtDate(new Date(lastOnce.deliveryDate), { weekday: "long", month: "short", day: "numeric" })}, ${lastOnce.window}</p>
+        ${tracker(lastOnce.stage || 0, lastOnce.method)}
+        ${(lastOnce.stage || 0) < 3 ? `<button class="link-btn" data-action="advance" data-target="${lastOnce.id}" style="font-size:13px">Demo: simulate next delivery step</button>` : `<p class="note">${isPickup(lastOnce) ? "Picked up" : "Delivered"}! Fridge meals first, freezer meals keep for 30 days.</p>`}
+        <div class="actions"><a class="btn btn-primary btn-sm" href="#/menu">Make it weekly →</a></div>
+      </div>`;
+    } else {
+      main = `<div class="panel"><h2>No active plan</h2><p class="muted">Your past orders are on the right.</p><a class="btn btn-primary btn-sm" href="#/menu">Build a new box →</a></div>`;
+    }
+
+    return `
+    <section class="page-head wrap">
+      <p class="eyebrow">My plan</p>
+      <h1 class="display">${state.delivery.name ? `Hey, ${esc(state.delivery.name.split(" ")[0])}.` : "Your meals."}</h1>
+      <p>Edit, skip, or pause before Friday night. No lock-in, ever.</p>
+    </section>
+    <section class="wrap split">
+      <div>${main}</div>
+      <aside class="panel sticky">
+        <h2>Order history</h2>
+        ${state.orders.length ? state.orders.map((o) => `<div class="history-row"><div>${o.id}<small>${fmtDate(new Date(o.placedAt))} · ${o.count} meals · ${o.type === "once" ? "One-time" : o.type === "update" ? "Plan update" : "Weekly plan"}</small></div><span>${money(o.total)}</span></div>`).join("") : `<p class="muted">No orders yet.</p>`}
+      </aside>
+    </section>`;
+  }
+
+  const countMeals = (items, storage) => Object.entries(items).filter(([id]) => mealById(id).storage === storage).reduce((s, [, q]) => s + q, 0);
+
+  // ---------- Dasher ----------
+  function buildRoutes() {
+    // Deterministic demo routes for the upcoming drop
+    const firsts = ["A.", "J.", "M.", "S.", "K.", "R.", "T.", "L.", "D.", "E.", "N.", "P."];
+    const lasts = ["Kim", "Patel", "Nguyen", "Lopez", "Brooks", "Okafor", "Chen", "Rivera", "Haddad", "Silva", "Ward", "Jensen"];
+    const areas = [
+      { id: "R1", name: "North Quad", halls: ["Maple Hall", "Cedar Hall"], mins: 40 },
+      { id: "R2", name: "Hilltop", halls: ["Aspen Hall", "Juniper Hall"], mins: 50 },
+      { id: "R3", name: "Central", halls: ["Birch Tower", "Willow Commons"], mins: 35 },
+      { id: "R4", name: "South Campus", halls: ["Summit Village", "Riverside Apartments"], mins: 60 },
+    ];
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 9301 + 49297) % 233280) / 233280);
+    return areas.map((a, ai) => {
+      const count = 6 + Math.floor(rnd() * 5);
+      const stops = Array.from({ length: count }, (_, i) => ({
+        hall: a.halls[i % 2],
+        room: `${1 + Math.floor(rnd() * 4)}${String(Math.floor(rnd() * 30) + 1).padStart(2, "0")}${rnd() > 0.7 ? "B" : ""}`,
+        who: `${firsts[(i + ai * 3) % firsts.length]} ${lasts[(i * 5 + ai) % lasts.length]}`,
+        meals: 3 + Math.floor(rnd() * 12),
+      })).sort((x, y) => x.hall.localeCompare(y.hall) || x.room.localeCompare(y.room));
+      const pay = DASHER_PAY.routeBase + DASHER_PAY.perBox * count;
+      return { ...a, stops, pay, boxes: count };
+    });
+  }
+
+  function viewDash() {
+    return state.dasher ? viewDasherDashboard() : viewDasherApply();
+  }
+
+  function viewDasherApply() {
+    const boxesPerHr = 10;
+    return `
+    <section class="page-head wrap">
+      <p class="eyebrow">Become a dasher</p>
+      <h1 class="display">Get paid to walk your campus.</h1>
+      <p>Dashers pick up packed boxes at the campus store and deliver them to dorms on Sunday evening or Monday morning. Flexible, on foot or bike, and you meet people in every hall.</p>
+    </section>
+    <section class="wrap split">
+      <form class="panel" id="dasherForm" novalidate>
+        <h2>Apply in 2 minutes</h2>
+        <div class="form-grid">
+          <div class="field"><label for="d-name">Full name</label><input id="d-name" name="name" autocomplete="name" value="${esc(state.delivery.name)}"><span class="err"></span></div>
+          <div class="field"><label for="d-email">School email (.edu)</label><input id="d-email" name="email" type="email" placeholder="you@school.edu" value="${esc(state.delivery.email)}"><span class="err"></span></div>
+          <div class="field"><label for="d-year">Year</label><select id="d-year" name="year"><option value="">Select</option><option>First-year</option><option>Sophomore</option><option>Junior</option><option>Senior</option><option>Grad student</option></select><span class="err"></span></div>
+          <div class="field"><label for="d-dorm">Where you live</label><select id="d-dorm" name="dorm"><option value="">Select</option>${DORMS.map((h) => `<option ${state.delivery.hall === h ? "selected" : ""}>${h}</option>`).join("")}<option>Off campus</option></select><span class="err"></span></div>
+          <div class="field full"><span class="label">When can you dash?</span>
+            <div class="check-row">
+              <label class="check-pill"><input type="checkbox" name="days" value="Sunday evening" checked><span>Sunday 5–9 PM</span></label>
+              <label class="check-pill"><input type="checkbox" name="days" value="Monday morning"><span>Monday 7–10 AM</span></label>
+            </div><span class="err" id="daysErr"></span>
+          </div>
+          <div class="field full"><span class="label">How will you get around?</span>
+            <div class="check-row">
+              ${["On foot", "Bike", "Scooter", "Skateboard"].map((t, i) => `<label class="check-pill"><input type="radio" name="transport" value="${t}" ${i === 0 ? "checked" : ""}><span>${t}</span></label>`).join("")}
+            </div>
+          </div>
+          <div class="field full">
+            <label class="agree"><input type="checkbox" name="agree"> I'll complete the 15-minute food-safety and cold-chain training and keep boxes in the insulated bags provided.</label>
+            <span class="err" id="agreeErr"></span>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-block" type="submit" style="margin-top:20px">Submit application →</button>
+        <p class="muted" style="font-size:13px;font-weight:600;text-align:center">We verify enrollment with your school email. Demo app: approval is instant.</p>
+      </form>
+      <aside class="sticky">
+        <div class="panel">
+          <h2>Earnings estimate</h2>
+          <div class="calc">
+            <label for="calc" style="font-weight:700">Boxes per week: <span id="calcN">12</span></label>
+            <input id="calc" type="range" min="4" max="40" value="12" data-action="calc">
+            <div class="big" id="calcOut">${money(DASHER_PAY.routeBase + DASHER_PAY.perBox * 12)}</div>
+            <small class="muted" style="font-weight:600" id="calcSub">per week · about ${Math.round((12 / boxesPerHr) * 60)} min of dashing</small>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>How dashing works</h2>
+          <ul class="perk-list">
+            <li><span class="ico">1</span><div><strong>Claim a route</strong><span>Routes cover 2 nearby halls, 6–10 boxes each.</span></div></li>
+            <li><span class="ico">2</span><div><strong>Pick up at the campus store</strong><span>Boxes are packed, labeled by room, and waiting in insulated bags.</span></div></li>
+            <li><span class="ico">3</span><div><strong>Drop at each door</strong><span>Tap "Delivered" per stop. Get paid ${money(DASHER_PAY.perBox)} a box plus ${money(DASHER_PAY.routeBase)} per route.</span></div></li>
+          </ul>
+        </div>
+      </aside>
+    </section>`;
+  }
+
+  function viewDasherDashboard() {
+    const ds = state.dasher;
+    const routes = buildRoutes();
+    const active = ds.active ? routes.find((r) => r.id === ds.active.routeId) : null;
+    const { drop, window } = nextDrop(ds.days.includes("Sunday evening") ? "sun" : "mon");
+    const hourly = ds.minutes ? (ds.earnings / (ds.minutes / 60)) : 0;
+
+    let activeHTML = "";
+    if (active) {
+      const done = ds.active.delivered;
+      const picked = ds.active.picked;
+      activeHTML = `<div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+          <h2 style="margin:0">Route ${active.id} · ${active.name}</h2><strong class="meal-price">${money(active.pay)}</strong>
+        </div>
+        <p class="muted" style="font-weight:600">${active.halls.join(" + ")} · ${active.boxes} boxes · ~${active.mins} min</p>
+        ${!picked ? `
+          <div class="note" style="margin:16px 0">Head to the <strong>Campus Store pickup counter</strong>. Show your dasher code <strong>${ds.code}</strong> and grab ${active.boxes} boxes in insulated bags for route ${active.id}.</div>
+          <button class="btn btn-dark" data-action="picked">I've picked up all ${active.boxes} boxes</button>
+          <button class="link-btn danger" data-action="drop-route" style="margin-left:16px">Release route</button>
+        ` : `
+          <div class="progress" aria-label="Route progress"><div style="width:${(done.length / active.boxes) * 100}%"></div></div>
+          <p style="font-weight:700;margin-top:-8px">${done.length} of ${active.boxes} delivered</p>
+          ${active.stops.map((s, i) => `<div class="stop ${done.includes(i) ? "done" : ""}">
+            <span class="n">${done.includes(i) ? "✓" : i + 1}</span>
+            <div><h5>${esc(s.hall)} · Room ${esc(s.room)}</h5><small>${esc(s.who)} · ${s.meals} meals</small></div>
+            ${done.includes(i) ? `<small style="color:#2c8a4b;font-weight:800">Delivered</small>` : `<button class="btn btn-dark btn-sm" data-action="deliver" data-i="${i}">Delivered</button>`}
+          </div>`).join("")}
+        `}
+      </div>`;
+    }
+
+    const available = routes.filter((r) => !ds.completed.includes(r.id) && (!active || r.id !== active.id));
+    return `
+    <section class="page-head wrap">
+      <p class="eyebrow">Dasher dashboard · Code ${ds.code}</p>
+      <h1 class="display">Nice to see you, ${esc(ds.name.split(" ")[0])}.</h1>
+      <p>Next shift: ${fmtDate(drop, { weekday: "long", month: "short", day: "numeric" })}, ${window}. Claim a route below. Boxes are first come, first served.</p>
+    </section>
+    <section class="wrap" style="padding-bottom:100px">
+      <div class="kpis">
+        <div class="kpi"><small>Earned</small><strong>${money(ds.earnings)}</strong></div>
+        <div class="kpi"><small>Boxes delivered</small><strong>${ds.delivered}</strong></div>
+        <div class="kpi"><small>Routes done</small><strong>${ds.completed.length}</strong></div>
+        <div class="kpi"><small>Effective hourly</small><strong>${hourly ? money(hourly) : "—"}</strong></div>
+      </div>
+      <div class="split" style="padding-bottom:0">
+        <div>
+          ${activeHTML}
+          <div class="panel">
+            <h2>Open routes this week</h2>
+            ${available.length ? available.map((r) => `<div class="route">
+              <div><h4>Route ${r.id} · ${r.name}</h4><div class="meta">${r.halls.join(" + ")} · ${r.boxes} boxes · ~${r.mins} min</div></div>
+              <div><div class="pay">${money(r.pay)}</div>
+                <button class="btn ${active ? "btn-light" : "btn-primary"} btn-sm" data-action="claim" data-id="${r.id}" ${active ? "disabled" : ""}>${active ? "Finish current route first" : "Claim route"}</button></div>
+            </div>`).join("") : `<p class="muted">You've cleared every route this week. Legend.</p>`}
+          </div>
+        </div>
+        <aside class="panel sticky">
+          <h2>Your profile</h2>
+          <div class="history-row"><span>Year</span><span>${esc(ds.year)}</span></div>
+          <div class="history-row"><span>Home hall</span><span>${esc(ds.dorm)}</span></div>
+          <div class="history-row"><span>Shifts</span><span style="text-align:right">${ds.days.map(esc).join("<br>")}</span></div>
+          <div class="history-row"><span>Getting around</span><span>${esc(ds.transport)}</span></div>
+          <div class="history-row"><span>Status</span><span class="pill-status">Verified</span></div>
+          <div class="actions"><button class="link-btn danger" data-action="leave-dasher">Stop dashing</button></div>
+        </aside>
+      </div>
+    </section>`;
+  }
+
+  // ---------------- Meal detail modal ----------------
+  function openMeal(id) {
+    const m = mealById(id);
+    const q = state.box[id] || 0;
+    $("#modalBody").innerHTML = `<div class="detail">
+      <div style="position:relative">${imgTag(m)}<div class="badges" style="position:absolute;top:18px;left:18px;display:flex;gap:8px">${tagBadges(m)}</div></div>
+      <div class="detail-body">
+        <div class="meal-meta">${esc(m.cuisine)} · ${methodLabel(m)} · ${m.minutes} min</div>
+        <h2 id="modalTitle">${esc(m.name)}</h2>
+        <p class="muted" style="margin:0">${esc(m.desc)}</p>
+        <div class="nutri">
+          <div><strong>${m.nutrition.cal}</strong><small>calories</small></div>
+          <div><strong>${m.nutrition.protein}g</strong><small>protein</small></div>
+          <div><strong>${m.nutrition.carbs}g</strong><small>carbs</small></div>
+          <div><strong>${m.nutrition.fat}g</strong><small>fat</small></div>
+        </div>
+        <p class="note">${m.storage === "freezer" ? "❄ Store in the freezer. Keeps 30 days." : `Store in the fridge. Best within ${m.keepsDays} days of delivery.`}</p>
+        <h4>In the kit (pre-portioned)</h4>
+        <ul>${m.ingredients.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>
+        <h4>How to make it</h4>
+        <ol>${m.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+        <div class="detail-actions">
+          <span class="meal-price">${money(m.price)}</span>
+          <button class="btn btn-primary" data-action="modal-add" data-id="${id}">${q ? `In box (${q}) · Add another` : "Add to box"}</button>
+        </div>
+      </div>
+    </div>`;
+    const modal = $("#modal");
+    modal.hidden = false;
+    document.body.style.overflow = "hidden";
+    $(".modal-close").focus();
+  }
+  function closeModal() {
+    $("#modal").hidden = true;
+    document.body.style.overflow = "";
+  }
+
+  // ---------------- Router ----------------
+  const routes = { "": viewHome, how: viewHome, menu: viewMenu, box: viewBox, confirmed: viewConfirmed, plan: viewPlan, dash: viewDash };
+
+  function render() {
+    const path = (location.hash.replace(/^#\/?/, "").split("?")[0]) || "";
+    const view = routes[path] || viewHome;
+    $("#app").innerHTML = view();
+    document.querySelectorAll(".main-nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === path));
+    updateBoxCount();
+    if (path === "how") {
+      requestAnimationFrame(() => $("#how")?.scrollIntoView({ behavior: "smooth" }));
+    }
+  }
+
+  function navigate(path) {
+    if (location.hash === "#/" + path) { render(); window.scrollTo(0, 0); }
+    else location.hash = "/" + path;
+  }
+
+  window.addEventListener("hashchange", () => { closeModal(); render(); if (!location.hash.includes("how")) window.scrollTo(0, 0); });
+  window.addEventListener("scroll", () => $(".site-header").classList.toggle("scrolled", window.scrollY > 10), { passive: true });
+
+  // ---------------- Events ----------------
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-action]");
+    if (e.target.id === "modal") { closeModal(); return; }
+    if (!el) return;
+    const { action, id, value } = el.dataset;
+    const path = location.hash.replace(/^#\/?/, "");
+
+    switch (action) {
+      case "inc": {
+        if (setQty(id, (state.box[id] || 0) + 1)) {
+          if (path === "box") render(); else refreshQtySlots();
+          if ((state.box[id] || 0) === 1) toast(`Added ${mealById(id).name}`);
+        }
+        break;
+      }
+      case "dec": {
+        setQty(id, (state.box[id] || 0) - 1);
+        if (path === "box") render(); else refreshQtySlots();
+        break;
+      }
+      case "open-meal": openMeal(id); break;
+      case "close-modal": closeModal(); break;
+      case "modal-add": {
+        if (setQty(id, (state.box[id] || 0) + 1)) { toast(`Added ${mealById(id).name}`); closeModal(); if (path === "box") render(); else refreshQtySlots(); }
+        break;
+      }
+      case "diet": ui.diet.has(value) ? ui.diet.delete(value) : ui.diet.add(value); render(); break;
+      case "clear-diet": ui.diet.clear(); render(); break;
+      case "method": captureCheckout(); state.delivery.method = value; save(); render(); break;
+      case "plan": captureCheckout(); state.plan = value; save(); render(); break;
+
+      case "edit-plan":
+        state.box = { ...state.subscription.items };
+        state.editing = true; save(); navigate("menu");
+        toast("Editing your plan. Change meals, then review.");
+        break;
+      case "cancel-edit": state.editing = false; state.box = {}; save(); navigate("plan"); break;
+      case "skip": state.subscription.skipNext = !state.subscription.skipNext; save(); render(); toast(state.subscription.skipNext ? "Next week skipped. No charge." : "Next week is back on."); break;
+      case "pause": state.subscription.status = state.subscription.status === "paused" ? "active" : "paused"; save(); render(); toast(state.subscription.status === "paused" ? "Plan paused." : "Welcome back! Plan resumed."); break;
+      case "cancel-sub":
+        if (confirm("Cancel your weekly plan? You can start a new one any time.")) { state.subscription = null; save(); render(); toast("Plan cancelled."); }
+        break;
+      case "advance": {
+        const target = el.dataset.target === "sub" ? state.subscription : state.orders.find((o) => o.id === el.dataset.target);
+        const cur = target.stage || 0;
+        target.stage = el.dataset.target === "sub" ? (cur + 1) % 4 : Math.min(cur + 1, 3);
+        if (target.stage === 3) toast("Delivered! Time to stock the fridge.");
+        save(); render();
+        break;
+      }
+
+      // dasher
+      case "claim": {
+        state.dasher.active = { routeId: id, picked: false, delivered: [], startedAt: Date.now() };
+        save(); render(); window.scrollTo({ top: 0, behavior: "smooth" }); toast(`Route ${id} is yours.`);
+        break;
+      }
+      case "drop-route": state.dasher.active = null; save(); render(); break;
+      case "picked": state.dasher.active.picked = true; save(); render(); break;
+      case "deliver": {
+        const ds = state.dasher; const i = +el.dataset.i;
+        if (!ds.active.delivered.includes(i)) ds.active.delivered.push(i);
+        const route = buildRoutes().find((r) => r.id === ds.active.routeId);
+        if (ds.active.delivered.length === route.boxes) {
+          ds.earnings += route.pay; ds.delivered += route.boxes; ds.minutes += route.mins;
+          ds.completed.push(route.id); ds.active = null;
+          toast(`Route done! +${money(route.pay)}`);
+        }
+        save(); render();
+        break;
+      }
+      case "leave-dasher":
+        if (confirm("Stop dashing? Your earnings history will be cleared in this demo.")) { state.dasher = null; save(); render(); }
+        break;
+    }
+  });
+
+  document.addEventListener("change", (e) => {
+    if (e.target.dataset.action === "sort") { ui.sort = e.target.value; render(); }
+  });
+  document.addEventListener("input", (e) => {
+    if (e.target.dataset.action === "calc") {
+      const n = +e.target.value;
+      $("#calcN").textContent = n;
+      const routesNeeded = Math.max(1, Math.ceil(n / 8));
+      $("#calcOut").textContent = money(DASHER_PAY.perBox * n + DASHER_PAY.routeBase * routesNeeded);
+      $("#calcSub").textContent = `per week · about ${Math.round((n / 10) * 60)} min of dashing`;
+    }
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#modal").hidden) closeModal(); });
+
+  // ---------------- Forms ----------------
+  function setErr(form, name, msg) {
+    const input = form.querySelector(`[name="${name}"]`);
+    const field = input?.closest(".field");
+    if (!field) return;
+    field.classList.toggle("invalid", !!msg);
+    const err = field.querySelector(".err");
+    if (err) err.textContent = msg || "";
+  }
+
+  function captureCheckout() {
+    const f = $("#checkoutForm");
+    if (!f) return;
+    const fd = new FormData(f);
+    Object.assign(state.delivery, {
+      name: (fd.get("name") || "").trim(), email: (fd.get("email") || "").trim(), slot: fd.get("slot") || "sun",
+    });
+    if (fd.has("hall")) state.delivery.hall = fd.get("hall") || "";
+    if (fd.has("room")) state.delivery.room = (fd.get("room") || "").trim();
+  }
+
+  document.addEventListener("submit", (e) => {
+    const f = e.target;
+    e.preventDefault();
+
+    if (f.id === "checkoutForm") {
+      captureCheckout();
+      const d = state.delivery;
+      let ok = true;
+      const check = (name, cond, msg) => { setErr(f, name, cond ? "" : msg); if (!cond) ok = false; };
+      check("name", d.name.length > 1, "Add your name for the label.");
+      check("email", /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email), "Enter a valid email.");
+      if (!isPickup(d)) {
+        check("hall", !!d.hall, "Pick your residence hall.");
+        check("room", d.room.length > 0, "Add your room number.");
+      }
+      save();
+      if (!ok) { f.querySelector(".invalid input, .invalid select")?.focus(); return; }
+
+      const method = d.method || "dash";
+      const { drop, window } = nextDrop(d.slot, method);
+      const code = state.subscription?.code || "P-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+      const items = { ...state.box };
+      const type = state.editing ? "update" : state.plan;
+      const order = {
+        id: "DD-" + Math.floor(1000 + Math.random() * 9000),
+        placedAt: Date.now(), items, count: countOf(items), total: totalOf(items),
+        deliveryDate: drop.toISOString(), window, hall: d.hall, room: d.room, type, stage: 0, method, code,
+      };
+      state.orders.unshift(order);
+      if (type === "weekly" || type === "update") {
+        state.subscription = {
+          ...(state.subscription || { status: "active", skipNext: false, startedAt: Date.now(), stage: 0 }),
+          items, hall: d.hall, room: d.room, slot: d.slot, method, code,
+        };
+      }
+      state.box = {}; state.editing = false; state.lastOrderId = order.id;
+      save(); navigate("confirmed");
+      return;
+    }
+
+    if (f.id === "dasherForm") {
+      const fd = new FormData(f);
+      const v = {
+        name: (fd.get("name") || "").trim(), email: (fd.get("email") || "").trim(),
+        year: fd.get("year") || "", dorm: fd.get("dorm") || "", days: fd.getAll("days"),
+        transport: fd.get("transport") || "On foot", agree: !!fd.get("agree"),
+      };
+      let ok = true;
+      const check = (name, cond, msg) => { setErr(f, name, cond ? "" : msg); if (!cond) ok = false; };
+      check("name", v.name.length > 1, "Add your full name.");
+      check("email", /^[^\s@]+@[^\s@]+\.edu$/i.test(v.email), "Use your school email ending in .edu.");
+      check("year", !!v.year, "Select your year.");
+      check("dorm", !!v.dorm, "Tell us where you live.");
+      $("#daysErr").textContent = v.days.length ? "" : "Pick at least one shift.";
+      $("#agreeErr").textContent = v.agree ? "" : "Please agree to the food-safety training.";
+      if (!v.days.length || !v.agree) ok = false;
+      if (!ok) { f.querySelector(".invalid input, .invalid select")?.focus(); return; }
+
+      state.dasher = {
+        ...v, code: "D" + Math.floor(100 + Math.random() * 900),
+        approvedAt: Date.now(), earnings: 0, delivered: 0, minutes: 0, completed: [], active: null,
+      };
+      save(); render(); window.scrollTo(0, 0);
+      toast("You're approved! Claim your first route.");
+    }
+  });
+
+  // ---------------- Boot ----------------
+  render();
+})();
