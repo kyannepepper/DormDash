@@ -260,6 +260,7 @@ h1, h2, h3 { font-family: var(--display); letter-spacing: -0.03em; }
 .storage div { flex: 1; border-radius: 18px; padding: 16px; }
 .storage .fr { background: var(--sky-soft); }
 .storage .fz { background: #eef0ff; }
+.storage .pt { background: #fbf6e2; }
 .storage strong { font-family: var(--display); font-size: 28px; display: block; }
 .storage small { font-weight: 600; color: var(--muted); }
 

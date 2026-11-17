@@ -21,7 +21,18 @@
   catch { state = defaults(); }
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
 
-  const ui = { diet: new Set(), sort: "popular" };
+  // Drop any meals saved from an older version of the menu
+  const knownIds = new Set(MEALS.map((m) => m.id));
+  const cleanItems = (items) => Object.fromEntries(Object.entries(items || {}).filter(([id]) => knownIds.has(id)));
+  state.box = cleanItems(state.box);
+  if (state.subscription) {
+    state.subscription.items = cleanItems(state.subscription.items);
+    if (!Object.keys(state.subscription.items).length) state.subscription = null;
+  }
+  state.orders = (state.orders || []).map((o) => ({ ...o, items: cleanItems(o.items) }));
+  save();
+
+  const ui = { category: "all", diet: new Set(), sort: "popular" };
 
   // ---------------- Helpers ----------------
   const $ = (s, el = document) => el.querySelector(s);
@@ -103,6 +114,13 @@
   function methodLabel(meal) {
     return METHODS[meal.method].label;
   }
+  const prepLabel = (meal) => (meal.minutes ? `${meal.minutes} min prep` : "Ready to eat");
+  const categoryLabel = (meal) => CATEGORIES[meal.category];
+  const STORAGE_TEXT = {
+    fridge: (m) => `Keep in the fridge. Best within ${m.keepsDays} days.`,
+    freezer: () => "Keep in the freezer. Good for 30 days.",
+    pantry: (m) => `No fridge needed. Keep on your shelf${m.keepsDays >= 30 ? "." : `, best within ${m.keepsDays} days.`}`,
+  };
 
   function mealCard(meal) {
     return `<article class="meal-card" data-meal="${meal.id}">
@@ -113,7 +131,7 @@
       <div class="meal-body">
         <div class="meal-top">
           <div>
-            <div class="meal-meta">${esc(meal.cuisine)} · ${meal.minutes} min</div>
+            <div class="meal-meta">${categoryLabel(meal)} · ${prepLabel(meal)}</div>
             <h3 class="meal-name" data-action="open-meal" data-id="${meal.id}">${esc(meal.name)}</h3>
           </div>
           <div class="meal-price">${money(meal.price)}</div>
@@ -158,8 +176,8 @@
 
   // ---------------- Views ----------------
   function viewHome() {
-    const hero = mealById("pesto-gnocchi");
-    const list = MEALS.slice(0, 6);
+    const hero = mealById("chicken-rice-bowl");
+    const list = ["overnight-oats", "chicken-wrap", "caesar-salad", "chicken-rice-bowl", "fajita-bowl", "apple-pb"].map(mealById);
     const { drop, cutoff } = nextDrop();
     return `
     <section class="hero">
@@ -167,7 +185,7 @@
         <div>
           <span class="sticker">CAMPUS FUEL, UPGRADED</span>
           <h1 class="display">Eat well.<span class="accent">Dash less.</span></h1>
-          <p class="hero-sub">Healthy $3–$5 meal kits made for tiny fridges, busy schedules, and zero grocery runs. Pick up to 14. We deliver the week.</p>
+          <p class="hero-sub">Healthy breakfast, lunch, dinner and snack kits from $2, made for tiny fridges, busy schedules, and zero grocery runs. Pick up to 14. We deliver the week.</p>
           <div class="hero-ctas">
             <a href="#/menu" class="btn btn-primary">Build my box →</a>
             <a href="#/how" class="btn btn-ghost">See how it works</a>
@@ -178,7 +196,7 @@
           <div class="blob lime"></div><div class="blob sky"></div>
           <div class="hero-card" data-action="open-meal" data-id="${hero.id}" style="cursor:pointer">
             ${imgTag(hero)}
-            <span class="pill">Ready in ${hero.minutes} min</span>
+            <span class="pill">${hero.minutes} min prep</span>
             <div class="label">
               <div><small>This week's favorite</small><strong>${hero.name}</strong></div>
               <span class="price">${money(hero.price)}</span>
@@ -197,7 +215,7 @@
             ${stepPhoto("4008586", "Hands using a phone to order food")}
             <div class="num">01</div>
             <h3>Pick your meals</h3>
-            <p>Choose 1–14 microwave-ready meals in the app. No stove, no oven, no dishes. Order by Friday night.</p>
+            <p>Choose up to 14 breakfast, lunch, dinner and snack kits in the app. No stove or oven needed. Order by Friday night.</p>
             <a href="#/menu" class="btn btn-primary btn-sm" style="margin-top:18px">Plan my meals →</a>
           </div>
           <div class="step">
@@ -216,7 +234,7 @@
             ${stepPhoto("5749087", "Student heating a meal in the microwave")}
             <div class="num">04</div>
             <h3>Make it yourself, easily</h3>
-            <p>Each bag has a simple step card on the back. Just open it, microwave it, and eat. Most meals are ready in under 5 minutes.</p>
+            <p>Each bag has a simple step card on the back. Every kit is no-cook or microwave-only, and ready in 10 minutes or less.</p>
           </div>
         </div>
         <p style="margin-top:48px;color:rgba(255,255,255,.75);font-weight:600">Next drop: <strong style="color:#fff">${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}</strong> · order by ${fmtDate(cutoff, { weekday: "long" })} 11:59 PM</p>
@@ -227,7 +245,7 @@
       <div class="wrap">
         <div class="section-head">
           <div><p class="eyebrow">This week's drop</p><h2 class="display">Good food. Tiny price.</h2></div>
-          <p>Pre-portioned, nutrient-dense, and tested in real dorm rooms. Every meal stays between $3 and $5.</p>
+          <p>Pre-portioned, nutrient-dense, and made for dorm rooms. Every kit is under $6, and snacks start at $2.</p>
         </div>
         <div class="meal-grid">${list.map(mealCard).join("")}</div>
         <div style="text-align:center;margin-top:48px"><a href="#/menu" class="btn btn-dark">See the full menu (${MEALS.length} meals) →</a></div>
@@ -255,25 +273,30 @@
   }
 
   function viewMenu() {
-    let list = [...MEALS];
+    let list = MEALS.filter((m) => ui.category === "all" || m.category === ui.category);
     if (ui.diet.has("veg")) list = list.filter((m) => m.tags.includes("Vegetarian"));
-    if (ui.diet.has("protein")) list = list.filter((m) => m.nutrition.protein >= 25);
+    if (ui.diet.has("protein")) list = list.filter((m) => m.nutrition.protein >= 20);
     if (ui.diet.has("budget")) list = list.filter((m) => m.price < 4);
-    if (ui.diet.has("freezer")) list = list.filter((m) => m.storage === "freezer");
+    if (ui.diet.has("nocook")) list = list.filter((m) => m.method !== "microwave");
     if (ui.sort === "low") list = [...list].sort((a, b) => a.price - b.price);
     if (ui.sort === "protein") list = [...list].sort((a, b) => b.nutrition.protein - a.nutrition.protein);
     if (ui.sort === "fast") list = [...list].sort((a, b) => a.minutes - b.minutes);
     if (ui.sort === "popular") list = [...list].sort((a, b) => b.tags.includes("Popular") - a.tags.includes("Popular"));
+    const cats = [["all", "All kits"], ...Object.entries(CATEGORIES)];
     const diet = (k, l) => `<button class="chip small ${ui.diet.has(k) ? "active" : ""}" data-action="diet" data-value="${k}" aria-pressed="${ui.diet.has(k)}">${l}</button>`;
     return `
     <section class="page-head wrap">
       <p class="eyebrow">${state.editing ? "Editing your weekly plan" : "Full menu"}</p>
-      <h1 class="display">Pick up to ${MAX_MEALS} meals.</h1>
-      <p>Every meal is made for the dorm microwave and ready in 5 minutes or less. Fresh meals go in the fridge, the rest in the freezer.</p>
+      <h1 class="display">Pick up to ${MAX_MEALS} kits.</h1>
+      <p>Breakfast, lunch, dinner and snack kits. Every one is no-cook or microwave-only, comes with step-by-step instructions, and is ready in 10 minutes or less.</p>
+      <p class="muted" style="font-size:13px;font-weight:600;margin-top:10px">Concept menu: prices are suggestions, not verified costs. Nutrition is estimated.</p>
     </section>
     <section class="wrap" style="padding-bottom:140px">
-      <div class="filters" role="group" aria-label="Filter meals">
-        ${diet("veg", "Vegetarian")}${diet("protein", "25g+ protein")}${diet("budget", "Under $4")}${diet("freezer", "Freezer-friendly")}
+      <div class="filters" role="group" aria-label="Filter by meal type">
+        ${cats.map(([v, l]) => `<button class="chip ${ui.category === v ? "active" : ""}" data-action="category" data-value="${v}" aria-pressed="${ui.category === v}">${l}</button>`).join("")}
+      </div>
+      <div class="filters" role="group" aria-label="Filter meals" style="margin-top:-24px">
+        ${diet("veg", "Vegetarian")}${diet("protein", "20g+ protein")}${diet("budget", "Under $4")}${diet("nocook", "No microwave needed")}
         <span class="spacer"></span>
         <label class="muted" style="font-weight:600;font-size:14px">Sort
           <select data-action="sort" aria-label="Sort meals">
@@ -302,8 +325,9 @@
       </section>`;
     }
     const subtotal = totalOf(state.box);
-    const fridge = items.filter(([id]) => mealById(id).storage === "fridge").reduce((s, [, q]) => s + q, 0);
-    const freezer = n - fridge;
+    const fridge = countMeals(state.box, "fridge");
+    const freezer = countMeals(state.box, "freezer");
+    const pantry = countMeals(state.box, "pantry");
     const d = state.delivery;
     const pickup = isPickup(d);
     const { drop, cutoff, window } = nextDrop(d.slot, d.method);
@@ -326,7 +350,7 @@
             const m = mealById(id);
             return `<div class="line-item">
               ${imgTag(m)}
-              <div><h4>${esc(m.name)}</h4><small>${methodLabel(m)} · ${m.storage === "freezer" ? "Freezer" : `Fridge, eat within ${m.keepsDays} days`}</small></div>
+              <div><h4>${esc(m.name)}</h4><small>${categoryLabel(m)} · ${prepLabel(m)} · ${m.storage === "fridge" ? `Fridge, eat within ${m.keepsDays} days` : m.storage === "freezer" ? "Freezer" : "Shelf"}</small></div>
               <div class="right"><strong>${money(m.price * q)}</strong>
                 <div class="stepper"><button data-action="dec" data-id="${id}" aria-label="Remove one">−</button><span>${q}</span><button class="plus" data-action="inc" data-id="${id}" aria-label="Add one">+</button></div>
               </div>
@@ -338,8 +362,9 @@
           <h2>Storage plan</h2>
           <p class="muted" style="margin-top:-8px">Here's where everything goes when your box lands.</p>
           <div class="storage">
-            <div class="fr"><strong>${fridge}</strong><small>meals in the fridge. Eat these first (Mon–Thu).</small></div>
-            <div class="fz"><strong>${freezer}</strong><small>meals in the freezer. Good for 30 days.</small></div>
+            ${fridge ? `<div class="fr"><strong>${fridge}</strong><small>in the fridge. Eat sandwiches and salads first.</small></div>` : ""}
+            ${freezer ? `<div class="fz"><strong>${freezer}</strong><small>in the freezer. Good for 30 days.</small></div>` : ""}
+            ${pantry ? `<div class="pt"><strong>${pantry}</strong><small>on your shelf. No fridge needed.</small></div>` : ""}
           </div>
         </div>
       </div>
@@ -450,7 +475,7 @@
           <h3 style="margin:24px 0 0;font-size:20px">${isPickup(sub) ? "Next pickup" : "Next drop"}: ${fmtDate(drop, { weekday: "long", month: "short", day: "numeric" })}, ${window}</h3>
           <p class="muted" style="margin:4px 0 0;font-weight:600">Changes lock ${fmtDate(cutoff, { weekday: "long" })} at 11:59 PM.</p>
           ${tracker(sub.stage || 0, sub.method)}
-          ${(sub.stage || 0) === 3 ? `<p class="note">${isPickup(sub) ? "Picked up" : "Delivered"}! Put your ${countMeals(sub.items, "fridge")} fridge meals in the fridge and ${countMeals(sub.items, "freezer")} in the freezer.</p>` : ""}
+          ${(sub.stage || 0) === 3 ? `<p class="note">${isPickup(sub) ? "Picked up" : "Delivered"}! Put ${countMeals(sub.items, "fridge")} kits in the fridge${countMeals(sub.items, "freezer") ? ` and ${countMeals(sub.items, "freezer")} in the freezer` : ""}. Each bag has its instructions on the back.</p>` : ""}
           <button class="link-btn" data-action="advance" data-target="sub" style="font-size:13px">${(sub.stage || 0) < 3 ? "Demo: simulate next delivery step" : "Demo: reset tracker"}</button>
         ` : status === "skipped" ? `<p class="note">You're skipping the ${fmtDate(drop)} drop. You won't be charged that week.</p>` : `<p class="note">Your plan is paused. No boxes or charges until you resume.</p>`}
         <div class="actions">
@@ -464,7 +489,7 @@
         <h2>In your weekly box</h2>
         ${Object.entries(sub.items).map(([id, q]) => {
           const m = mealById(id);
-          return `<div class="line-item">${imgTag(m)}<div><h4>${esc(m.name)}</h4><small>${methodLabel(m)} · ${m.minutes} min</small></div>
+          return `<div class="line-item">${imgTag(m)}<div><h4>${esc(m.name)}</h4><small>${categoryLabel(m)} · ${prepLabel(m)}</small></div>
             <div class="right"><strong>×${q}</strong><button class="link-btn" data-action="open-meal" data-id="${id}" style="font-size:13px">Instructions</button></div></div>`;
         }).join("")}
       </div>`;
@@ -473,7 +498,7 @@
         <h2>Order ${lastOnce.id}</h2>
         <p class="muted" style="font-weight:600">${lastOnce.count} meals · ${isPickup(lastOnce) ? `Campus store pickup (code ${lastOnce.code})` : `${esc(lastOnce.hall)}, room ${esc(lastOnce.room)}`} · ${fmtDate(new Date(lastOnce.deliveryDate), { weekday: "long", month: "short", day: "numeric" })}, ${lastOnce.window}</p>
         ${tracker(lastOnce.stage || 0, lastOnce.method)}
-        ${(lastOnce.stage || 0) < 3 ? `<button class="link-btn" data-action="advance" data-target="${lastOnce.id}" style="font-size:13px">Demo: simulate next delivery step</button>` : `<p class="note">${isPickup(lastOnce) ? "Picked up" : "Delivered"}! Fridge meals first, freezer meals keep for 30 days.</p>`}
+        ${(lastOnce.stage || 0) < 3 ? `<button class="link-btn" data-action="advance" data-target="${lastOnce.id}" style="font-size:13px">Demo: simulate next delivery step</button>` : `<p class="note">${isPickup(lastOnce) ? "Picked up" : "Delivered"}! Fridge kits first. Each bag has its instructions on the back.</p>`}
         <div class="actions"><a class="btn btn-primary btn-sm" href="#/menu">Make it weekly →</a></div>
       </div>`;
     } else {
@@ -662,19 +687,20 @@
     $("#modalBody").innerHTML = `<div class="detail">
       <div style="position:relative">${imgTag(m)}<div class="badges" style="position:absolute;top:18px;left:18px;display:flex;gap:8px">${tagBadges(m)}</div></div>
       <div class="detail-body">
-        <div class="meal-meta">${esc(m.cuisine)} · ${methodLabel(m)} · ${m.minutes} min</div>
+        <div class="meal-meta">${categoryLabel(m)} · ${methodLabel(m)} · ${prepLabel(m)}</div>
         <h2 id="modalTitle">${esc(m.name)}</h2>
         <p class="muted" style="margin:0">${esc(m.desc)}</p>
-        <div class="nutri">
+        <h4 style="margin-top:22px">Estimated nutrition</h4>
+        <div class="nutri" style="margin-top:0">
           <div><strong>${m.nutrition.cal}</strong><small>calories</small></div>
           <div><strong>${m.nutrition.protein}g</strong><small>protein</small></div>
           <div><strong>${m.nutrition.carbs}g</strong><small>carbs</small></div>
           <div><strong>${m.nutrition.fat}g</strong><small>fat</small></div>
         </div>
-        <p class="note">${m.storage === "freezer" ? "❄ Store in the freezer. Keeps 30 days." : `Store in the fridge. Best within ${m.keepsDays} days of delivery.`}</p>
+        <p class="note">${STORAGE_TEXT[m.storage](m)}</p>
         <h4>In the kit (pre-portioned)</h4>
         <ul>${m.ingredients.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>
-        <h4>How to make it</h4>
+        <h4>${m.minutes ? "Instructions" : "How to eat it"}</h4>
         <ol>${m.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
         <div class="detail-actions">
           <span class="meal-price">${money(m.price)}</span>
@@ -742,7 +768,8 @@
         break;
       }
       case "diet": ui.diet.has(value) ? ui.diet.delete(value) : ui.diet.add(value); render(); break;
-      case "clear-diet": ui.diet.clear(); render(); break;
+      case "clear-diet": ui.diet.clear(); ui.category = "all"; render(); break;
+      case "category": ui.category = value; render(); break;
       case "method": captureCheckout(); state.delivery.method = value; save(); render(); break;
       case "plan": captureCheckout(); state.plan = value; save(); render(); break;
 
