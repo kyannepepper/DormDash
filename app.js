@@ -15,6 +15,7 @@
     orders: [],
     dasher: null,
     lastOrderId: null,
+    user: null,
   });
   let state;
   try { state = Object.assign(defaults(), JSON.parse(localStorage.getItem(KEY) || "{}")); }
@@ -32,7 +33,11 @@
   state.orders = (state.orders || []).map((o) => ({ ...o, items: cleanItems(o.items) }));
   save();
 
-  const ui = { category: "all", diet: new Set(), sort: "popular" };
+  const ui = { category: "all", diet: new Set(), sort: "popular", redirect: "" };
+
+  // Prototype login: one test account, checked in the browser only (no real authentication).
+  const TEST_ACCOUNT = { studentId: "D000000000", passwords: ["password", "pasword"] };
+  const PROTECTED = ["plan", "dash"];
 
   // ---------------- Helpers ----------------
   const $ = (s, el = document) => el.querySelector(s);
@@ -219,10 +224,12 @@
             <a href="#/menu" class="btn btn-primary btn-sm" style="margin-top:18px">Plan my meals →</a>
           </div>
           <div class="step">
-            ${stepPhoto("10361128", "Food pre-portioned in sealed plastic bags")}
+            <div class="img step-img sticker-img" data-label="Dorm Dash box sticker">
+              <img src="images/box-sticker.png" alt="The Dorm Dash sticker that goes on every box" loading="lazy" onerror="this.parentElement.classList.add('fallback')">
+            </div>
             <div class="num">02</div>
             <h3>It arrives packed</h3>
-            <p>Every meal comes pre-portioned in sealed, labeled bags, ready to drop straight into your mini fridge or freezer.</p>
+            <p>Every kit comes pre-portioned in sealed, labeled bags inside a box with the Dorm Dash sticker on it, ready to drop straight into your mini fridge.</p>
           </div>
           <div class="step">
             ${stepPhoto("4604599", "Student courier biking with a delivery bag")}
@@ -424,9 +431,13 @@
       <p class="eyebrow">Order ${o.id}</p>
       <h1 class="display">${o.type === "update" ? "Plan updated." : "You're set for the week."}</h1>
       ${isPickup(o) ? `
-      <p class="muted" style="font-size:19px">${o.count} meals will be ready at the <strong style="color:var(--ink)">Campus Store pickup counter</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. Show this code at the counter:</p>
+      <p class="muted" style="font-size:19px">${o.count} ${o.count === 1 ? "kit" : "kits"} will be ready at the <strong style="color:var(--ink)">Campus Store pickup counter</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. Show this code at the counter:</p>
       <div class="pickup-code">${o.code}</div>` : `
-      <p class="muted" style="font-size:19px">${o.count} meals heading to <strong style="color:var(--ink)">${esc(o.hall)}, room ${esc(o.room)}</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. We'll text you when your dasher is on the way.</p>`}
+      <p class="muted" style="font-size:19px">${o.count} ${o.count === 1 ? "kit" : "kits"} heading to <strong style="color:var(--ink)">${esc(o.hall)}, room ${esc(o.room)}</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. We'll text you when your dasher is on the way.</p>`}
+      <figure class="sticker-preview">
+        <img src="images/box-sticker.png" alt="The Dorm Dash sticker on your box">
+        <figcaption>Look for this sticker on your box. Order ${o.id} is written on the "Meal Kit" line.</figcaption>
+      </figure>
       <div class="actions" style="justify-content:center">
         <a class="btn btn-dark" href="#/plan">${o.type === "once" ? "Track my order" : "Manage my plan"} →</a>
         <a class="btn btn-ghost" href="#/menu">Back to menu</a>
@@ -515,7 +526,7 @@
       <div>${main}</div>
       <aside class="panel sticky">
         <h2>Order history</h2>
-        ${state.orders.length ? state.orders.map((o) => `<div class="history-row"><div>${o.id}<small>${fmtDate(new Date(o.placedAt))} · ${o.count} meals · ${o.type === "once" ? "One-time" : o.type === "update" ? "Plan update" : "Weekly plan"}</small></div><span>${money(o.total)}</span></div>`).join("") : `<p class="muted">No orders yet.</p>`}
+        ${state.orders.length ? state.orders.map((o) => `<div class="history-row"><div>${o.id}<small>${fmtDate(new Date(o.placedAt))} · ${o.count} ${o.count === 1 ? "kit" : "kits"} · ${o.type === "once" ? "One-time" : o.type === "update" ? "Plan update" : "Weekly plan"}</small></div><span>${money(o.total)}</span></div>`).join("") : `<p class="muted">No orders yet.</p>`}
       </aside>
     </section>`;
   }
@@ -718,13 +729,71 @@
     document.body.style.overflow = "";
   }
 
+  // ---------------- Login ----------------
+  function viewLogin() {
+    const why = { plan: "to see your plan", dash: "to open the dasher dashboard", box: "to place your order" }[ui.redirect];
+    return `
+    <section class="wrap login-wrap">
+      <div class="login-card">
+        <aside class="login-side">
+          <p class="eyebrow">Utah Tech · Dorm meal kits</p>
+          <h2 class="display">Eat better,<br>spend less.</h2>
+          <img src="images/box-sticker.png" alt="Dorm Dash box sticker" class="login-sticker">
+        </aside>
+        <form class="login-form" id="loginForm" novalidate>
+          <h1>Log in</h1>
+          <p class="muted" style="margin:0 0 24px">${why ? `Log in with your student ID ${why}.` : "Use your student ID and password."}</p>
+          <div class="field">
+            <label for="l-id">Student ID</label>
+            <input id="l-id" name="studentId" placeholder="D000000000" autocomplete="username" autocapitalize="characters" spellcheck="false" maxlength="10">
+            <span class="err"></span>
+          </div>
+          <div class="field" style="margin-top:16px">
+            <label for="l-pw">Password</label>
+            <div class="pw-row">
+              <input id="l-pw" name="password" type="password" autocomplete="current-password">
+              <button type="button" class="link-btn" data-action="toggle-pw" aria-controls="l-pw">Show</button>
+            </div>
+            <span class="err"></span>
+          </div>
+          <p class="err login-err" id="loginErr" role="alert"></p>
+          <button class="btn btn-primary btn-block" type="submit" style="margin-top:8px">Log in →</button>
+          <div class="note demo-login">
+            <strong>Test login</strong>
+            <span>Student ID <code>D000000000</code> · Password <code>password</code></span>
+            <button type="button" class="link-btn" data-action="fill-test">Fill it in for me</button>
+          </div>
+        </form>
+      </div>
+    </section>`;
+  }
+
+  function updateAuth() {
+    const a = $("#authLink");
+    if (!a) return;
+    if (state.user) {
+      a.textContent = "Log out";
+      a.title = `Logged in as ${state.user.studentId}`;
+      a.dataset.action = "logout";
+      a.setAttribute("href", "#/");
+    } else {
+      a.textContent = "Log in";
+      a.title = "";
+      delete a.dataset.action;
+      a.setAttribute("href", "#/login");
+    }
+  }
+
   // ---------------- Router ----------------
-  const routes = { "": viewHome, how: viewHome, menu: viewMenu, box: viewBox, confirmed: viewConfirmed, plan: viewPlan, dash: viewDash };
+  const routes = { "": viewHome, how: viewHome, menu: viewMenu, box: viewBox, confirmed: viewConfirmed, plan: viewPlan, dash: viewDash, login: viewLogin };
 
   function render() {
     const path = (location.hash.replace(/^#\/?/, "").split("?")[0]) || "";
-    const view = routes[path] || viewHome;
+    let view = routes[path] || viewHome;
+    if (PROTECTED.includes(path) && !state.user) { ui.redirect = path; view = viewLogin; }
+    if (path === "login" && state.user) view = viewHome;
     $("#app").innerHTML = view();
+    updateAuth();
     document.querySelectorAll(".main-nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === path));
     updateBoxCount();
     if (path === "how") {
@@ -749,6 +818,18 @@
     const path = location.hash.replace(/^#\/?/, "");
 
     switch (action) {
+      case "logout":
+        e.preventDefault();
+        state.user = null; save(); navigate(""); toast("You're logged out.");
+        break;
+      case "fill-test":
+        $("#l-id").value = TEST_ACCOUNT.studentId; $("#l-pw").value = "password"; $("#l-pw").focus();
+        break;
+      case "toggle-pw": {
+        const pw = $("#l-pw"); const show = pw.type === "password";
+        pw.type = show ? "text" : "password"; el.textContent = show ? "Hide" : "Show";
+        break;
+      }
       case "inc": {
         if (setQty(id, (state.box[id] || 0) + 1)) {
           if (path === "box") render(); else refreshQtySlots();
@@ -857,6 +938,35 @@
   document.addEventListener("submit", (e) => {
     const f = e.target;
     e.preventDefault();
+
+    if (f.id === "checkoutForm" && !state.user) {
+      captureCheckout(); save();
+      ui.redirect = "box"; navigate("login");
+      toast("Log in with your student ID to place your order.");
+      return;
+    }
+
+    if (f.id === "loginForm") {
+      const id = (f.studentId.value || "").trim().toUpperCase();
+      const pw = f.password.value || "";
+      let ok = true;
+      const formatOk = /^D\d{8,9}$/.test(id);
+      setErr(f, "studentId", !id ? "Enter your student ID." : formatOk ? "" : "Student IDs start with D followed by your ID number.");
+      setErr(f, "password", pw ? "" : "Enter your password.");
+      $("#loginErr").textContent = "";
+      if (!id || !formatOk || !pw) ok = false;
+      if (ok && !(id === TEST_ACCOUNT.studentId && TEST_ACCOUNT.passwords.includes(pw))) {
+        $("#loginErr").textContent = "That student ID and password don't match. Check them and try again.";
+        ok = false;
+      }
+      if (!ok) { f.querySelector(".invalid input")?.focus(); return; }
+      state.user = { studentId: id, loggedInAt: Date.now() };
+      save();
+      const to = ui.redirect || ""; ui.redirect = "";
+      navigate(to);
+      toast(`Welcome back, ${id}!`);
+      return;
+    }
 
     if (f.id === "checkoutForm") {
       captureCheckout();
