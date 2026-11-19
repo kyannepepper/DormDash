@@ -57,8 +57,16 @@
   const PAYMENTS = {
     account: { label: "Charge to student account", short: "Student account", note: "Added to your Utah Tech student account bill." },
     bison: { label: "Use Bison Bucks", short: "Bison Bucks", note: "Paid from your Bison Bucks balance." },
+    card: { label: "Pay with card", short: "Card", note: "Debit or credit card." },
   };
-  const payLabel = (x) => PAYMENTS[x?.payment || "account"].short;
+  const payLabel = (x) => (x?.payment === "card" ? `Card •••• ${x.cardLast4 || ""}` : PAYMENTS[x?.payment || "account"].short);
+  const paidWith = (o) => o.payment === "bison" ? "Paid with Bison Bucks" : o.payment === "card" ? `Charged to card ending ${o.cardLast4}` : "Charged to your student account";
+  // Card details live in memory only (never saved to the browser), and only the last 4 digits are kept on the order.
+  const card = { number: "", exp: "", cvc: "", zip: "" };
+  const digits = (v) => (v || "").replace(/\D/g, "");
+  const luhn = (num) => { let sum = 0; [...num].reverse().forEach((c, i) => { let n = +c; if (i % 2) { n *= 2; if (n > 9) n -= 9; } sum += n; }); return sum % 10 === 0; };
+  const fmtCard = (v) => digits(v).slice(0, 16).replace(/(\d{4})(?=\d)/g, "$1 ");
+  const fmtExp = (v) => { const d = digits(v).slice(0, 4); return d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d; };
   const isPickup = (x) => (x?.method || "dash") === "pickup";
   const windowLabel = (method, slot) => `${slot === "mon" ? "Monday" : "Sunday"} ${WINDOWS[method || "dash"][slot || "sun"]}`;
 
@@ -423,6 +431,14 @@
           <div class="plan-toggle pay-toggle" role="radiogroup" aria-label="Payment method">
             ${Object.entries(PAYMENTS).map(([k, p]) => `<button type="button" class="plan-opt ${(d.payment || "account") === k ? "active" : ""}" data-action="payment" data-value="${k}" role="radio" aria-checked="${(d.payment || "account") === k}"><strong>${p.label}</strong><small>${p.note}</small></button>`).join("")}
           </div>
+          ${(d.payment || "account") === "card" ? `
+          <div class="card-fields form-grid">
+            <div class="field full"><label for="c-num">Card number</label><input id="c-num" name="cardNumber" inputmode="numeric" autocomplete="cc-number" placeholder="1234 5678 9012 3456" value="${esc(card.number)}" data-format="card"><span class="err"></span></div>
+            <div class="field"><label for="c-exp">Expiry</label><input id="c-exp" name="cardExp" inputmode="numeric" autocomplete="cc-exp" placeholder="MM/YY" value="${esc(card.exp)}" data-format="exp"><span class="err"></span></div>
+            <div class="field"><label for="c-cvc">CVC</label><input id="c-cvc" name="cardCvc" inputmode="numeric" autocomplete="cc-csc" placeholder="123" maxlength="4" value="${esc(card.cvc)}"><span class="err"></span></div>
+            <div class="field full"><label for="c-zip">Billing ZIP</label><input id="c-zip" name="cardZip" inputmode="numeric" autocomplete="postal-code" placeholder="84770" maxlength="5" value="${esc(card.zip)}"><span class="err"></span></div>
+            <div class="field full"><p class="note" style="margin:0">Demo only: don't enter a real card. Use test card <code>4242 4242 4242 4242</code>, any future date, any CVC. <button type="button" class="link-btn" data-action="test-card">Fill test card</button></p></div>
+          </div>` : ""}
           <p class="muted" style="font-size:13px;font-weight:600">${state.editing || state.plan === "weekly" ? "Charged each week before your drop. " : ""}Demo app: no real payment is taken.</p>
           <button class="btn btn-primary btn-block" type="submit">${state.editing ? "Update my plan" : state.plan === "weekly" ? "Start weekly plan" : "Place order"} · ${money(subtotal)}</button>
           ${state.editing ? `<div style="text-align:center;margin-top:14px"><button type="button" class="link-btn" data-action="cancel-edit">Cancel editing</button></div>` : ""}
@@ -439,7 +455,7 @@
       <div class="tick">✓</div>
       <p class="eyebrow">Order ${o.id}</p>
       <h1 class="display">${o.type === "update" ? "Plan updated." : "You're set for the week."}</h1>
-      <p class="paid-with">${money(o.total)} · ${o.payment === "bison" ? "Paid with Bison Bucks" : "Charged to your student account"}</p>
+      <p class="paid-with">${money(o.total)} · ${paidWith(o)}</p>
       ${isPickup(o) ? `
       <p class="muted" style="font-size:19px">${o.count} ${o.count === 1 ? "kit" : "kits"} will be ready at the <strong style="color:var(--ink)">Campus Store pickup counter</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. Show this code at the counter:</p>
       <div class="pickup-code">${o.code}</div>` : `
@@ -862,7 +878,14 @@
       case "clear-diet": ui.diet.clear(); ui.category = "all"; render(); break;
       case "category": ui.category = value; render(); break;
       case "method": captureCheckout(); state.delivery.method = value; save(); render(); break;
-      case "payment": captureCheckout(); state.delivery.payment = value; save(); render(); break;
+      case "payment": captureCheckout(); state.delivery.payment = value; save(); render(); if (value === "card") $("#c-num")?.focus(); break;
+      case "test-card": {
+        const y = String((new Date().getFullYear() + 2) % 100).padStart(2, "0");
+        const t = { "#c-num": "4242 4242 4242 4242", "#c-exp": "12/" + y, "#c-cvc": "123", "#c-zip": "84770" };
+        Object.entries(t).forEach(([sel, v]) => { const i = $(sel); if (i) { i.value = v; i.closest(".field")?.classList.remove("invalid"); const er = i.closest(".field")?.querySelector(".err"); if (er) er.textContent = ""; } });
+        captureCheckout();
+        break;
+      }
       case "plan": captureCheckout(); state.plan = value; save(); render(); break;
 
       case "edit-plan":
@@ -915,6 +938,9 @@
     if (e.target.dataset.action === "sort") { ui.sort = e.target.value; render(); }
   });
   document.addEventListener("input", (e) => {
+    const fmt = e.target.dataset?.format;
+    if (fmt === "card") e.target.value = fmtCard(e.target.value);
+    if (fmt === "exp") e.target.value = fmtExp(e.target.value);
     if (e.target.dataset.action === "calc") {
       const n = +e.target.value;
       $("#calcN").textContent = n;
@@ -944,6 +970,7 @@
     });
     if (fd.has("hall")) state.delivery.hall = fd.get("hall") || "";
     if (fd.has("room")) state.delivery.room = (fd.get("room") || "").trim();
+    if (fd.has("cardNumber")) Object.assign(card, { number: fd.get("cardNumber") || "", exp: fd.get("cardExp") || "", cvc: fd.get("cardCvc") || "", zip: fd.get("cardZip") || "" });
   }
 
   document.addEventListener("submit", (e) => {
@@ -990,6 +1017,14 @@
         check("hall", !!d.hall, "Pick your residence hall.");
         check("room", d.room.length > 0, "Add your room number.");
       }
+      if (d.payment === "card") {
+        const num = digits(card.number), [mm, yy] = card.exp.split("/").map((x) => +x);
+        const now = new Date(), expOk = mm >= 1 && mm <= 12 && yy >= 0 && new Date(2000 + yy, mm, 1) > now;
+        check("cardNumber", num.length >= 15 && num.length <= 16 && luhn(num), "Enter a valid card number.");
+        check("cardExp", /^\d{2}\/\d{2}$/.test(card.exp) && expOk, "Enter a future date as MM/YY.");
+        check("cardCvc", /^\d{3,4}$/.test(card.cvc), "Enter the 3 or 4 digit code.");
+        check("cardZip", /^\d{5}$/.test(card.zip), "Enter a 5-digit ZIP.");
+      }
       save();
       if (!ok) { f.querySelector(".invalid input, .invalid select")?.focus(); return; }
 
@@ -1001,16 +1036,17 @@
       const order = {
         id: "DD-" + Math.floor(1000 + Math.random() * 9000),
         placedAt: Date.now(), items, count: countOf(items), total: totalOf(items),
-        deliveryDate: drop.toISOString(), window, hall: d.hall, room: d.room, type, stage: 0, method, code, payment: d.payment || "account",
+        deliveryDate: drop.toISOString(), window, hall: d.hall, room: d.room, type, stage: 0, method, code, payment: d.payment || "account", cardLast4: d.payment === "card" ? digits(card.number).slice(-4) : undefined,
       };
       state.orders.unshift(order);
       if (type === "weekly" || type === "update") {
         state.subscription = {
           ...(state.subscription || { status: "active", skipNext: false, startedAt: Date.now(), stage: 0 }),
-          items, hall: d.hall, room: d.room, slot: d.slot, method, code, payment: d.payment || "account",
+          items, hall: d.hall, room: d.room, slot: d.slot, method, code, payment: d.payment || "account", cardLast4: d.payment === "card" ? digits(card.number).slice(-4) : undefined,
         };
       }
       state.box = {}; state.editing = false; state.lastOrderId = order.id;
+      Object.assign(card, { number: "", exp: "", cvc: "", zip: "" });
       save(); navigate("confirmed");
       return;
     }

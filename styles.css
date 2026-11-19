@@ -456,3 +456,11 @@ h1, h2, h3 { font-family: var(--display); letter-spacing: -0.03em; }
 .pay-title { font-size: 18px; margin: 22px 0 10px; }
 .pay-toggle { margin-bottom: 10px; }
 .paid-with { display: inline-block; margin: 0 0 18px; padding: 8px 16px; border-radius: 999px; background: var(--lime); font-weight: 800; font-size: 15px; }
+
+.pay-toggle { grid-template-columns: 1fr; gap: 10px; }
+.pay-toggle .plan-opt { padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.pay-toggle .plan-opt small { text-align: right; }
+.card-fields { margin: 6px 0 14px; }
+.card-fields code { background: #fff; padding: 1px 6px; border-radius: 6px; font-size: 13px; }
+.card-fields .link-btn { font-size: 13px; color: #6b5a1c; }
+@media (max-width: 760px) { .pay-toggle .plan-opt { display: block; } .pay-toggle .plan-opt small { text-align: left; } }
