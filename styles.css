@@ -451,3 +451,8 @@ h1, h2, h3 { font-family: var(--display); letter-spacing: -0.03em; }
   .site-header .brand-name { display: none; }
   .box-btn { padding: 8px 10px 8px 16px; }
 }
+
+/* ---------- Payment ---------- */
+.pay-title { font-size: 18px; margin: 22px 0 10px; }
+.pay-toggle { margin-bottom: 10px; }
+.paid-with { display: inline-block; margin: 0 0 18px; padding: 8px 16px; border-radius: 999px; background: var(--lime); font-weight: 800; font-size: 15px; }

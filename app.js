@@ -10,7 +10,7 @@
     box: {},
     plan: "weekly",
     editing: false,
-    delivery: { method: "dash", name: "", email: "", hall: "", room: "", slot: "sun" },
+    delivery: { method: "dash", payment: "account", name: "", email: "", hall: "", room: "", slot: "sun" },
     subscription: null,
     orders: [],
     dasher: null,
@@ -54,6 +54,11 @@
     dash: { sun: "5–9 PM", mon: "7–10 AM" },
     pickup: { sun: "12–8 PM", mon: "8 AM–6 PM" },
   };
+  const PAYMENTS = {
+    account: { label: "Charge to student account", short: "Student account", note: "Added to your Utah Tech student account bill." },
+    bison: { label: "Use Bison Bucks", short: "Bison Bucks", note: "Paid from your Bison Bucks balance." },
+  };
+  const payLabel = (x) => PAYMENTS[x?.payment || "account"].short;
   const isPickup = (x) => (x?.method || "dash") === "pickup";
   const windowLabel = (method, slot) => `${slot === "mon" ? "Monday" : "Sunday"} ${WINDOWS[method || "dash"][slot || "sun"]}`;
 
@@ -414,7 +419,11 @@
           <div class="summary-row"><span>${pickup ? "Campus store pickup" : "Dorm delivery"}</span><span class="free">FREE</span></div>
           <div class="summary-row"><span>Avg per meal</span><span>${money(subtotal / n)}</span></div>
           <div class="summary-row total"><span>${state.editing || state.plan === "weekly" ? "Weekly total" : "Total"}</span><span>${money(subtotal)}</span></div>
-          <p class="muted" style="font-size:13px;font-weight:600">Pay with card or campus dining dollars at confirmation. Demo app: no real payment is taken.</p>
+          <h3 class="pay-title">Payment</h3>
+          <div class="plan-toggle pay-toggle" role="radiogroup" aria-label="Payment method">
+            ${Object.entries(PAYMENTS).map(([k, p]) => `<button type="button" class="plan-opt ${(d.payment || "account") === k ? "active" : ""}" data-action="payment" data-value="${k}" role="radio" aria-checked="${(d.payment || "account") === k}"><strong>${p.label}</strong><small>${p.note}</small></button>`).join("")}
+          </div>
+          <p class="muted" style="font-size:13px;font-weight:600">${state.editing || state.plan === "weekly" ? "Charged each week before your drop. " : ""}Demo app: no real payment is taken.</p>
           <button class="btn btn-primary btn-block" type="submit">${state.editing ? "Update my plan" : state.plan === "weekly" ? "Start weekly plan" : "Place order"} · ${money(subtotal)}</button>
           ${state.editing ? `<div style="text-align:center;margin-top:14px"><button type="button" class="link-btn" data-action="cancel-edit">Cancel editing</button></div>` : ""}
         </div>
@@ -430,6 +439,7 @@
       <div class="tick">✓</div>
       <p class="eyebrow">Order ${o.id}</p>
       <h1 class="display">${o.type === "update" ? "Plan updated." : "You're set for the week."}</h1>
+      <p class="paid-with">${money(o.total)} · ${o.payment === "bison" ? "Paid with Bison Bucks" : "Charged to your student account"}</p>
       ${isPickup(o) ? `
       <p class="muted" style="font-size:19px">${o.count} ${o.count === 1 ? "kit" : "kits"} will be ready at the <strong style="color:var(--ink)">Campus Store pickup counter</strong> on ${fmtDate(drop, { weekday: "long", month: "long", day: "numeric" })}, ${o.window}. Show this code at the counter:</p>
       <div class="pickup-code">${o.code}</div>` : `
@@ -481,7 +491,7 @@
         <div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:center">
           <h2 style="margin:0">Weekly plan</h2><span class="pill-status ${status}">${statusText}</span>
         </div>
-        <p class="muted" style="font-weight:600">${n} meals · ${money(totalOf(sub.items))}/week · ${where} · ${windowLabel(sub.method, sub.slot)}</p>
+        <p class="muted" style="font-weight:600">${n} meals · ${money(totalOf(sub.items))}/week · ${payLabel(sub)} · ${where} · ${windowLabel(sub.method, sub.slot)}</p>
         ${status === "active" ? `
           <h3 style="margin:24px 0 0;font-size:20px">${isPickup(sub) ? "Next pickup" : "Next drop"}: ${fmtDate(drop, { weekday: "long", month: "short", day: "numeric" })}, ${window}</h3>
           <p class="muted" style="margin:4px 0 0;font-weight:600">Changes lock ${fmtDate(cutoff, { weekday: "long" })} at 11:59 PM.</p>
@@ -526,7 +536,7 @@
       <div>${main}</div>
       <aside class="panel sticky">
         <h2>Order history</h2>
-        ${state.orders.length ? state.orders.map((o) => `<div class="history-row"><div>${o.id}<small>${fmtDate(new Date(o.placedAt))} · ${o.count} ${o.count === 1 ? "kit" : "kits"} · ${o.type === "once" ? "One-time" : o.type === "update" ? "Plan update" : "Weekly plan"}</small></div><span>${money(o.total)}</span></div>`).join("") : `<p class="muted">No orders yet.</p>`}
+        ${state.orders.length ? state.orders.map((o) => `<div class="history-row"><div>${o.id}<small>${fmtDate(new Date(o.placedAt))} · ${o.count} ${o.count === 1 ? "kit" : "kits"} · ${o.type === "once" ? "One-time" : o.type === "update" ? "Plan update" : "Weekly plan"} · ${payLabel(o)}</small></div><span>${money(o.total)}</span></div>`).join("") : `<p class="muted">No orders yet.</p>`}
       </aside>
     </section>`;
   }
@@ -852,6 +862,7 @@
       case "clear-diet": ui.diet.clear(); ui.category = "all"; render(); break;
       case "category": ui.category = value; render(); break;
       case "method": captureCheckout(); state.delivery.method = value; save(); render(); break;
+      case "payment": captureCheckout(); state.delivery.payment = value; save(); render(); break;
       case "plan": captureCheckout(); state.plan = value; save(); render(); break;
 
       case "edit-plan":
@@ -990,13 +1001,13 @@
       const order = {
         id: "DD-" + Math.floor(1000 + Math.random() * 9000),
         placedAt: Date.now(), items, count: countOf(items), total: totalOf(items),
-        deliveryDate: drop.toISOString(), window, hall: d.hall, room: d.room, type, stage: 0, method, code,
+        deliveryDate: drop.toISOString(), window, hall: d.hall, room: d.room, type, stage: 0, method, code, payment: d.payment || "account",
       };
       state.orders.unshift(order);
       if (type === "weekly" || type === "update") {
         state.subscription = {
           ...(state.subscription || { status: "active", skipNext: false, startedAt: Date.now(), stage: 0 }),
-          items, hall: d.hall, room: d.room, slot: d.slot, method, code,
+          items, hall: d.hall, room: d.room, slot: d.slot, method, code, payment: d.payment || "account",
         };
       }
       state.box = {}; state.editing = false; state.lastOrderId = order.id;
