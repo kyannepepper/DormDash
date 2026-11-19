@@ -611,11 +611,6 @@
               <label class="check-pill"><input type="checkbox" name="days" value="Monday morning"><span>Monday 7–10 AM</span></label>
             </div><span class="err" id="daysErr"></span>
           </div>
-          <div class="field full"><span class="label">How will you get around?</span>
-            <div class="check-row">
-              ${["On foot", "Bike", "Scooter", "Skateboard"].map((t, i) => `<label class="check-pill"><input type="radio" name="transport" value="${t}" ${i === 0 ? "checked" : ""}><span>${t}</span></label>`).join("")}
-            </div>
-          </div>
           <div class="field full">
             <label class="agree"><input type="checkbox" name="agree"> I'll complete the 15-minute food-safety and cold-chain training and keep boxes in the insulated bags provided.</label>
             <span class="err" id="agreeErr"></span>
@@ -709,7 +704,6 @@
           <div class="history-row"><span>Year</span><span>${esc(ds.year)}</span></div>
           <div class="history-row"><span>Home hall</span><span>${esc(ds.dorm)}</span></div>
           <div class="history-row"><span>Shifts</span><span style="text-align:right">${ds.days.map(esc).join("<br>")}</span></div>
-          <div class="history-row"><span>Getting around</span><span>${esc(ds.transport)}</span></div>
           <div class="history-row"><span>Status</span><span class="pill-status">Verified</span></div>
           <div class="actions"><button class="link-btn danger" data-action="leave-dasher">Stop dashing</button></div>
         </aside>
@@ -1056,7 +1050,7 @@
       const v = {
         name: (fd.get("name") || "").trim(), email: (fd.get("email") || "").trim(),
         year: fd.get("year") || "", dorm: fd.get("dorm") || "", days: fd.getAll("days"),
-        transport: fd.get("transport") || "On foot", agree: !!fd.get("agree"),
+        agree: !!fd.get("agree"),
       };
       let ok = true;
       const check = (name, cond, msg) => { setErr(f, name, cond ? "" : msg); if (!cond) ok = false; };
