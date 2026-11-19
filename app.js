@@ -190,7 +190,7 @@
         <div>
           <span class="sticker">CAMPUS FUEL, UPGRADED</span>
           <h1 class="display">Eat well.<span class="accent">Dash less.</span></h1>
-          <p class="hero-sub">Healthy breakfast, lunch, dinner and snack kits from $2, made for tiny fridges, busy schedules, and zero grocery runs. Pick up to 14. We deliver the week.</p>
+          <p class="hero-sub">Healthy breakfast, lunch, dinner and snack kits from $3, made for tiny fridges, busy schedules, and zero grocery runs. Pick up to 14. We deliver the week.</p>
           <div class="hero-ctas">
             <a href="#/menu" class="btn btn-primary">Build my box →</a>
             <a href="#/how" class="btn btn-ghost">See how it works</a>
@@ -252,7 +252,7 @@
       <div class="wrap">
         <div class="section-head">
           <div><p class="eyebrow">This week's drop</p><h2 class="display">Good food. Tiny price.</h2></div>
-          <p>Pre-portioned, nutrient-dense, and made for dorm rooms. Every kit is under $6, and snacks start at $2.</p>
+          <p>Pre-portioned, nutrient-dense, and made for dorm rooms. Meals start at $3, and every kit is under $6.</p>
         </div>
         <div class="meal-grid">${list.map(mealCard).join("")}</div>
         <div style="text-align:center;margin-top:48px"><a href="#/menu" class="btn btn-dark">See the full menu (${MEALS.length} meals) →</a></div>
